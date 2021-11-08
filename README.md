@@ -1,6 +1,6 @@
 # OpenGL_Study_Recording
-Test in Windows10 of VS2019.
-Dependent librarys in 3rdparty.
+Test in Windows10 of VS2019.\n
+Dependent librarys in 3rdparty.\n
 Refer to:
 	https://learnopengl-cn.github.io/
 My CSDN blog:
