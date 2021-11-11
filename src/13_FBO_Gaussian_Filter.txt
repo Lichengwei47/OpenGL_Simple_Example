@@ -1,0 +1,397 @@
+//参考：https://blog.csdn.net/mutex86/article/details/9615631
+#include <stdlib.h>
+#include<iostream>
+#include<GL/glew.h>
+#include<GL/glut.h>
+#include <opencv.hpp>
+
+//纹理的编号
+static GLuint texture;    //lena图像作为纹理
+static GLuint texWeigArr1;	//自己生成的纹理1
+static GLuint texWeigArr2;	//自己生成的纹理2
+static GLuint texOutput;    //产生结果的纹理
+
+static GLuint fb;			//FBO编号
+
+//#define printOpenGLError() printOglError(__FILE__, __LINE__)
+
+const GLint imgHeight = 512, imgWidth = 512;
+const GLint imgHeight2 = 256, imgWidth2 = 256;
+static GLfloat   weight_1[imgWidth][imgHeight];    //权值矩阵1
+static GLfloat   weight_2[imgHeight2][imgWidth2];   //权值矩阵2
+static  GLfloat outPutFb[imgHeight * imgWidth];   //输出纹理缓冲
+static GLubyte  pData[imgHeight * imgWidth];   //存储最终的图像数据
+
+//顶点着色器
+const char* vShader = {
+	//"#version 110  \n "
+	"void main()"
+	"{"
+		"gl_TexCoord[0] = gl_MultiTexCoord0;"
+		"gl_TexCoord[1] = gl_MultiTexCoord1;"
+		"gl_TexCoord[2] = gl_MultiTexCoord2;"
+		"gl_Position = ftransform();"
+	"}"
+};
+
+//片元着色器
+const char* fShader = {
+	//"#version 110          \n "
+	"#extension GL_ARB_texture_rectangle : enable  \n"
+	"uniform sampler2DRect  LenaTexture;         \n"
+	"uniform sampler2DRect  WeightTex1;         \n"
+	"uniform sampler2DRect  WeightTex2;         \n"
+	"void main()         \n"
+	"{          \n"
+		"vec2   weig1Pos =  gl_TexCoord[1].st;					\n "
+		"vec2   weig2Pos =  gl_TexCoord[0].st / 2.0;"
+		"vec2     pos1 = vec2(gl_TexCoord[0].s,512.0-gl_TexCoord[0].t);"
+		"vec4   texColor   =  texture2DRect(LenaTexture,pos1 );         \n"
+		"vec4   weight1    =  texture2DRect(WeightTex1, weig1Pos);          \n "
+		"vec4   weight2    =  texture2DRect(WeightTex2, weig2Pos);          \n"
+		"texColor.yzw = vec3(0.0,0.0,0.0);         \n"
+		"weight1.yzw = vec3(0.0,0.0,0.0);         \n"
+		"if ( gl_TexCoord[0].s >256.0)"
+		"{ gl_FragColor = texColor;     }   \n"
+		"else"
+		"{gl_FragColor =   weight1 * weight2;   }     \n"
+
+	"}        \n"
+};
+
+////输出错误相关信息
+//int printOglError(char* file, int line)
+//{
+//	GLenum glErr;
+//	int retCode = 0;
+//
+//	glErr = glGetError();
+//	while (glErr != GL_NO_ERROR)
+//	{
+//		printf("glError in file %s @ line %d: %s\n", file, line, gluErrorString(glErr));
+//		retCode = 1;
+//		glErr = glGetError();
+//	}
+//	return retCode;
+//}
+//
+////输出opengl错误
+//void printInfoLog(GLhandleARB obj)
+//{
+//	int infologLength = 0;
+//	int charsWritten = 0;
+//	GLcharARB* infoLog;
+//	//printOpenGLError();
+//
+//	glGetObjectParameterivARB(obj, GL_OBJECT_INFO_LOG_LENGTH_ARB, &infologLength);
+//	//printOpenGLError();
+//
+//	if (infologLength > 0)
+//	{
+//		infoLog = (GLcharARB*)malloc(infologLength);
+//		if (infoLog == NULL)
+//		{
+//			printf("ERROR: Could not allocate InfoLog buffer\n");
+//			exit(1);
+//		}
+//		glGetInfoLogARB(obj, infologLength, &charsWritten, infoLog);
+//		printf("InfoLog:\n%s\n\n", infoLog);
+//		free(infoLog);
+//	}
+//	//printOpenGLError();
+//}
+
+
+
+/*************************************************************
+function name:   initShaders
+input:   1.    const char *vShaderCode,
+			2.     const char *fShaderCode,
+output:  1.    -1   compile error
+			 2.    -2    link  error
+			 3.	     progHandle
+description：
+
+*****************************************************************/
+GLhandleARB initShaders(const char* vShaderCode, const char* fShaderCode)
+{
+	GLhandleARB vertHandle, fragHandle, progHandle;   //对象句柄
+	GLint vertCompiled, fragCompiled;				//状态值
+	GLint linked;
+
+	//创建顶点着色器对象和片元着色器对象
+	vertHandle = glCreateShaderObjectARB(GL_VERTEX_SHADER_ARB);
+	fragHandle = glCreateShaderObjectARB(GL_FRAGMENT_SHADER_ARB);
+
+	//将源代码字符串加载到着色器中
+	glShaderSource(vertHandle, 1, &vShaderCode, NULL);
+	glShaderSource(fragHandle, 1, &fShaderCode, NULL);
+
+	printf("编译码块顶点着色器并打印编译器日志文件:\n");
+	//编译码块顶点着色器并打印编译器日志文件
+	glCompileShaderARB(vertHandle);
+	//printOpenGLError();				//检查opengl错误
+	glGetObjectParameterivARB(vertHandle, GL_OBJECT_COMPILE_STATUS_ARB, &vertCompiled);
+	//printInfoLog(vertHandle);
+
+	printf("编译码块片元着色器并打印编译器日志文件:\n");
+	//编译码块片元着色器并打印编译器日志文件
+	glCompileShaderARB(fragHandle);
+	//printOpenGLError();             //检查opengl错误
+	glGetObjectParameterivARB(fragHandle, GL_OBJECT_COMPILE_STATUS_ARB, &fragCompiled);
+	//printInfoLog(fragHandle);
+
+
+	if (!vertCompiled || !fragCompiled)
+		return -1;
+
+	//创建一个程序对象并附加两个编译好的着色器
+	progHandle = glCreateProgramObjectARB();
+	glAttachObjectARB(progHandle, vertHandle);
+	glAttachObjectARB(progHandle, fragHandle);
+
+	printf("链接程序对象并打印信息日志:\n");
+	//链接程序对象并打印信息日志
+	glLinkProgramARB(progHandle);
+	//printOpenGLError();             //检查opengl错误
+	glGetObjectParameterivARB(progHandle, GL_OBJECT_LINK_STATUS_ARB, &linked);
+	//printInfoLog(progHandle);
+
+	if (!linked)
+		return -2;
+
+	//将程序对象安装为当前状态的一部分
+	glUseProgramObjectARB(progHandle);     //改为运行的函数，用于测试该算法的时间
+
+	return progHandle;
+}
+
+//装载一个bmp图像使之成为纹理，其中貌似包含了 glTexImage2D这个函数的功能
+
+int LoadGLTextures(const char* textureFilePath)
+{
+	//unsigned char* pTexData = NULL;
+
+	//long bitCnt = 0;
+	//long iw = 0;
+	//long ih = 0;   //以上三个参数其实是没有的，~_~
+	//long status = LoadBMP(textureFilePath, &pTexData, &iw, &ih, &bitCnt);
+	GLubyte* pixels2;
+
+	cv::Mat I2 = cv::imread("C:\\Users\\Yao\\Desktop\\1.jpg");
+	int pixellength = I2.rows * I2.cols * 3;
+	pixels2 = new GLubyte[pixellength];
+	cv::imshow("去雾图像显示", I2);
+	cv::waitKey();
+	memcpy(pixels2, I2.data, pixellength * sizeof(char));
+	glGenTextures(1, &texture);
+	glBindTexture(GL_TEXTURE_RECTANGLE_ARB, texture);
+
+	//当卷积内核超过了图像边界时使用图像边缘的像素值
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+
+	//纹理过滤的方式不应该设置为线性插值
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	if(pixels2)
+	{glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGB, imgWidth, imgHeight, 0, GL_RGB, GL_UNSIGNED_BYTE, pixels2);
+	}
+
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+
+	return 0;
+}
+
+void init()
+{
+
+	glShadeModel(GL_FLAT);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	glViewport(0, 0, imgWidth, imgHeight);
+	glEnable(GL_DEPTH_TEST);
+
+	//LoadGLTextures("texture.bmp");
+	if (LoadGLTextures("C:\\Users\\Yao\\Desktop\\wall.jpg") == 1)
+		printf(" Load Faild!   \n");
+
+	//初始化权值矩阵1
+	for (int i = 0; i < imgHeight; ++i)
+		for (int j = 0; j < imgWidth; ++j)
+		{
+			weight_1[i][j] = 1.0;
+		}
+	glGenTextures(1, &texWeigArr1);
+	glBindTexture(GL_TEXTURE_RECTANGLE_ARB, texWeigArr1);
+	//当卷积内核超过了图像边界时使用图像边缘的像素值
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+
+	//纹理过滤的方式不应该设置为线性插值
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+
+	glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_LUMINANCE, imgWidth, imgHeight, 0, GL_LUMINANCE, GL_FLOAT, weight_1);
+
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+
+	//初始化权值矩阵2
+	for (int i = 0; i < imgHeight2 / 2; ++i)
+		for (int j = 0; j < imgWidth2 / 2; ++j)
+		{
+		for (int j = imgWidth2 / 2; j < imgWidth2; ++j)
+		{
+			weight_2[i][j] = 0.8;
+		}
+
+	for (int i = 0; i < imgHeight2 / 2; ++i)
+			weight_2[i][j] = 0.0;
+		}
+
+	for (int i = imgHeight2 / 2; i < imgHeight2; ++i)
+		for (int j = 0; j < imgWidth2 / 2; ++j)
+		{
+			weight_2[i][j] = 1.0;
+		}
+	for (int i = imgHeight2 / 2; i < imgHeight2; ++i)
+		for (int j = imgWidth2 / 2; j < imgWidth2; ++j)
+		{
+			weight_2[i][j] = 0.2;
+		}
+	glGenTextures(1, &texWeigArr2);
+	glBindTexture(GL_TEXTURE_RECTANGLE_ARB, texWeigArr2);
+	//当卷积内核超过了图像边界时使用图像边缘的像素值
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+
+	//纹理过滤的方式不应该设置为线性插值
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_LUMINANCE, imgWidth2,
+		imgHeight2, 0, GL_LUMINANCE, GL_FLOAT, weight_2);
+
+	//设置输出纹理的参数
+	glGenTextures(1, &texOutput);
+	glBindTexture(GL_TEXTURE_RECTANGLE_ARB, texOutput);
+
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+
+	//纹理过滤的方式不应该设置为线性插值
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+
+	//没有给输出的纹理数据，等待程序进行赋值
+	glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGBA, imgWidth, imgHeight, 0, GL_RGBA, GL_FLOAT, 0);
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+
+	//激活各个纹理
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_RECTANGLE_ARB, texture);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_RECTANGLE_ARB, texWeigArr1);
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_RECTANGLE_ARB, texWeigArr2);
+}
+void initFBO(unsigned unWidth, unsigned unHeight)
+{
+	//创建FBO，准备屏幕外帧缓存
+	glGenFramebuffersEXT(1, &fb);
+
+	//绑定屏幕外帧缓存，即避开了窗口系统默认的渲染目标
+	glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fb);
+
+
+}
+void readFromTexture(GLfloat* data)
+{
+	glReadBuffer(GL_COLOR_ATTACHMENT0_EXT);
+	glReadPixels(0, 0, imgWidth, imgHeight,
+		GL_LUMINANCE, GL_FLOAT, data);
+
+}
+void display(void)
+{
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	//关联输出缓存至FBO
+		glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT,
+			GL_COLOR_ATTACHMENT0_EXT,
+			GL_TEXTURE_RECTANGLE_ARB, texOutput, 0);
+
+	glDrawBuffer(GL_COLOR_ATTACHMENT0_EXT);
+
+	glBegin(GL_QUADS);
+
+	glMultiTexCoord2f(GL_TEXTURE0, 0.0, 0.0);
+	glMultiTexCoord2f(GL_TEXTURE1, 0.0, 0.0);
+	glMultiTexCoord2f(GL_TEXTURE2, 0.0, 0.0);
+	glVertex2f(-1.0, -1.0);
+
+	glMultiTexCoord2f(GL_TEXTURE0, 0.0, 512.0);
+	glMultiTexCoord2f(GL_TEXTURE1, 0.0, 512.0);
+	glMultiTexCoord2f(GL_TEXTURE2, 0.0, 512.0);
+	glVertex2f(-1.0, 1.0);
+
+	glMultiTexCoord2f(GL_TEXTURE0, 512.0, 512.0);
+	glMultiTexCoord2f(GL_TEXTURE1, 512.0, 512.0);
+	glMultiTexCoord2f(GL_TEXTURE2, 512.0, 512.0);
+	glVertex2f(1.0, 1.0);
+
+	glMultiTexCoord2f(GL_TEXTURE0, 512.0, 0.0);
+	glMultiTexCoord2f(GL_TEXTURE1, 512.0, 0.0);
+	glMultiTexCoord2f(GL_TEXTURE2, 512.0, 0.0);
+	glVertex2f(1.0, -1.0);
+
+	glEnd();
+	glFlush();
+}
+
+
+
+
+int main(int argc, char* argv[])
+{
+	GLhandleARB progHandle = 0;
+
+	glutInit(&argc, argv);
+	//glutInitDisplayMode(GLUT_SINGLE | GLUT_LUMINANCE);
+	glutInitDisplayMode(GLUT_SINGLE | GLUT_RGB);
+	glutInitWindowSize(imgWidth, imgHeight);
+	glutInitWindowPosition(100, 100);
+	glutCreateWindow(" gningh多重纹理&FBO ");
+
+	glewInit();
+	initFBO(imgWidth, imgHeight);
+	init();
+
+	progHandle = initShaders(vShader, fShader);
+	if (progHandle <= 0)
+		printf("Failed to run shader.\n");
+	else {
+		//设置初始一致变量
+		glUniform1i(glGetUniformLocation(progHandle, "LenaTexture"), 0);   //0 是纹理的句柄
+		glUniform1i(glGetUniformLocation(progHandle, "WeightTex1"), 1);
+		glUniform1i(glGetUniformLocation(progHandle, "WeightTex2"), 2);
+
+	}
+	//glutDisplayFunc(display);
+	display();
+
+	readFromTexture(outPutFb);
+
+	//因为outputFb中保存的图像灰度都是0~1之间的数值表示的
+	//这里我们要将0~1之间的数值乘以255变为0~255之间的灰度
+	for (int i = 0; i < imgHeight * imgWidth; ++i)
+	{
+		pData[i] = (char)(outPutFb[i] * 255);
+	}
+
+	//将pData中数据保存为result.bmp。8代表是8位灰度
+	/*asrSaveBMP("result.bmp", pData, imgWidth, imgHeight, 8);*/
+	cv::Mat gray1_mat(512, 512, CV_32F, outPutFb);//为了显示图片 先改为mat类型
+	imshow("去雾图像显示", gray1_mat);
+	cv::waitKey();
+	cv::imwrite("test.jpg  ", gray1_mat);
+	return 0;
+}
